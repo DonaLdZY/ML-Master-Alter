@@ -2,8 +2,11 @@
 data_dir: null
 dataset_dir: null
 
+# [修改] 删除了 desc_file，新增了 template_file
 # either provide a path to a plaintext file describing the task
-desc_file: null
+template_file: null #
+device_type: "a cpu"
+
 # or provide the task goal (and optionally evaluation information) as arguments
 goal: null
 eval: null
@@ -29,9 +32,9 @@ exec:
 # agent hyperparams
 agent:
   # how many improvement iterations to run
-  steps: 500
+  steps: 100
   # total time available to agent
-  time_limit: 43200 # 12 hrs (purely informational, implementation is user's resp)
+  time_limit: 3600 # 12 hrs (purely informational, implementation is user's resp)
   # whether to instruct the agent to use CV (set to 1 to disable)
   k_fold_validation: 1
   # whether to instruct the agent to generate a prediction function
@@ -43,7 +46,7 @@ agent:
   # whether to obfuscate that we're doing kaggle
   obfuscate: False
   # check submission format
-  check_format: True
+  check_format: False
   # for mcts
   save_all_submission: True
   # steerable reasoning, only works when your deepseek api support client.completions.create()

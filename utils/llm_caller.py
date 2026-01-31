@@ -17,7 +17,7 @@ class LLM:
         api_key: str = "dummy-key",
         model_name: str = "default-model",
         temperature: float = 0.7,
-        max_tokens: int = 16384,
+        max_tokens: int = 8192,
         stop_tokens: Optional[Union[str, List[str]]] = None,
         retry_time: int = 20,
         delay_time: int = 3,

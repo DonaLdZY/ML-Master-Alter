@@ -427,6 +427,14 @@ The memory of previous solutions used to improve performance is provided below:
         self,
     ):
         self.data_preview = data_preview.generate(self.cfg.workspace_dir)
+        try:
+            log_path = self.cfg.log_dir / "initial_data_analysis.log"
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(self.data_preview)
+            logger.info(f"Initial data analysis saved to {log_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save initial data analysis log: {e}")
+
 
     def backpropagate(self, node: MCTSNode, value: float, add_to_tree=True):
         logger.info(f"node {node.id} start backpropagating with reward {value}.")
@@ -510,22 +518,26 @@ The memory of previous solutions used to improve performance is provided below:
                 or response["metric"] is None
                 or has_csv_submission == False
             )
-            if not node.is_buggy and self.acfg.check_format:
-                exp_id = self.cfg.exp_name.split("_")[0]
-                logger.info(f"Start checking the format of submission.csv of node {node.id}")
-                status, res = call_validate(exp_id=exp_id, submission_path=self.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv")
-                if status:
-                    if not res['is_valid']:
-                        logger.warning(f"Node {node.id} is marked as buggy because file: submission.csv is invalid.")
-                        node.is_valid = False
-                        node._term_out.append(f"\n{res['result']}")
-                        node.analysis = "This previous solution runs without any bugs, but the format of the generated submission file is incorrect."
+            if not node.is_buggy:
+                if self.acfg.check_format:
+                    exp_id = self.cfg.exp_name.split("_")[0]
+                    logger.info(f"Start checking the format of submission.csv of node {node.id}")
+                    status, res = call_validate(exp_id=exp_id, submission_path=self.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv")
+                    if status:
+                        if not res['is_valid']:
+                            logger.warning(f"Node {node.id} is marked as buggy because file: submission.csv is invalid.")
+                            node.is_valid = False
+                            node._term_out.append(f"\n{res['result']}")
+                            node.analysis = "This previous solution runs without any bugs, but the format of the generated submission file is incorrect."
+                        else:
+                            node.is_valid = True
+                            logger.info(f"Node {node.id} file: submission.csv is valid.")
                     else:
-                        node.is_valid = True
-                        logger.info(f"Node {node.id} file: submission.csv is valid.")
+                        logger.error(f"An unexpected error occurred: {res}, skip this stage.")
+                        node.is_valid = True # set is_valid to True as default if using server is set but we can not connext to the server
                 else:
-                    logger.error(f"An unexpected error occurred: {res}, skip this stage.")
-                    node.is_valid = True # set is_valid to True as default if using server is set but we can not connext to the server
+                    logger.info(f"Skipping format check for node {node.id} as check_format is False.")
+                    node.is_valid = True
 
             if node.is_buggy:
                 logger.info(
@@ -629,22 +641,26 @@ The memory of previous solutions used to improve performance is provided below:
             or response["metric"] is None
             or has_csv_submission == False
         )
-        if not node.is_buggy and self.acfg.check_format:
-            exp_id = self.cfg.exp_name.split("_")[0]
-            logger.info(f"Start checking the format of submission.csv of node {node.id}")
-            status, res = call_validate(exp_id=exp_id, submission_path=self.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv")
-            if status:
-                if not res['is_valid']:
-                    logger.warning(f"Node {node.id} is marked as buggy because file: submission.csv is invalid.")
-                    node.is_valid = False
-                    node._term_out.append(f"\n{res['result']}")
-                    node.analysis = "This previous solution runs without any bugs, but the format of the generated submission file is incorrect."
+        if not node.is_buggy:
+            if self.acfg.check_format:
+                exp_id = self.cfg.exp_name.split("_")[0]
+                logger.info(f"Start checking the format of submission.csv of node {node.id}")
+                status, res = call_validate(exp_id=exp_id, submission_path=self.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv")
+                if status:
+                    if not res['is_valid']:
+                        logger.warning(f"Node {node.id} is marked as buggy because file: submission.csv is invalid.")
+                        node.is_valid = False
+                        node._term_out.append(f"\n{res['result']}")
+                        node.analysis = "This previous solution runs without any bugs, but the format of the generated submission file is incorrect."
+                    else:
+                        node.is_valid = True
+                        logger.info(f"Node {node.id} file: submission.csv is valid.")
                 else:
-                    node.is_valid = True
-                    logger.info(f"Node {node.id} file: submission.csv is valid.")
+                    logger.error(f"An unexpected error occurred: {res}, skip this stage.")
             else:
-                logger.error(f"An unexpected error occurred: {res}, skip this stage.")
-
+                # [新增]
+                logger.info(f"Skipping format check for node {node.id} as check_format is False.")
+                node.is_valid = True
         if node.is_buggy:
             logger.info(
                 f"Parsed results: Node {node.id} is buggy and/or did not produce a submission.csv"

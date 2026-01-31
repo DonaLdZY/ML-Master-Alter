@@ -2,7 +2,7 @@
 set -x # Print commands and their arguments as they are executed
 
 # the same dataset_dir with run.sh
-dataset_dir=/path/to/mle-bench
+dataset_dir=/home/donaldzy/文档/data
 
 # launch a server which tells agent whether the submission is valid or not, allowed by MLE-Bench rules
 nohup python -u grading_server.py \

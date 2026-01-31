@@ -101,7 +101,9 @@ class ExecConfig:
 class Config(Hashable):
     data_dir: Path
     dataset_dir: Path
-    desc_file: Path | None
+    # desc_file: Path | None
+    template_file: Path | None
+    
 
     goal: str | None
     eval: str | None
@@ -119,6 +121,7 @@ class Config(Hashable):
     agent: AgentConfig
     start_cpu_id: str
     cpu_number: str
+    device_type: str = "a cpu with 8GB memory"
 
 
 def _get_next_logindex(dir: Path) -> int:
@@ -150,17 +153,24 @@ def prep_cfg(cfg: Config):
     if cfg.data_dir is None:
         raise ValueError("`data_dir` must be provided.")
 
-    if cfg.desc_file is None and cfg.goal is None:
+    # if cfg.desc_file is None and cfg.goal is None:
+    #     raise ValueError(
+    #         "You must provide either a description of the task goal (`goal=...`) or a path to a plaintext file containing the description (`desc_file=...`)."
+    #     )
+    if cfg.template_file is None and cfg.goal is None:
         raise ValueError(
-            "You must provide either a description of the task goal (`goal=...`) or a path to a plaintext file containing the description (`desc_file=...`)."
+            "You must provide either a description of the task goal (`goal=...`) or a path to the instruction template file (`template_file=...`)."
         )
 
     if cfg.data_dir.startswith("example_tasks/"):
         cfg.data_dir = Path(__file__).parent.parent / cfg.data_dir
     cfg.data_dir = Path(cfg.data_dir).resolve()
 
-    if cfg.desc_file is not None:
-        cfg.desc_file = Path(cfg.desc_file).resolve()
+    # if cfg.desc_file is not None:
+    #     cfg.desc_file = Path(cfg.desc_file).resolve()
+
+    if cfg.template_file is not None:
+        cfg.template_file = Path(cfg.template_file).resolve()
 
     top_log_dir = Path(cfg.log_dir).resolve()
     top_log_dir.mkdir(parents=True, exist_ok=True)
@@ -189,14 +199,51 @@ def load_task_desc(cfg: Config):
     """Load task description from markdown file or config str."""
 
     # either load the task description from a file
-    if cfg.desc_file is not None:
-        if not (cfg.goal is None and cfg.eval is None):
-            logger.warning(
-                "Ignoring goal and eval args because task description file is provided."
-            )
+    # if cfg.desc_file is not None:
+    #     if not (cfg.goal is None and cfg.eval is None):
+    #         logger.warning(
+    #             "Ignoring goal and eval args because task description file is provided."
+    #         )
 
-        with open(cfg.desc_file) as f:
-            return f.read()
+    #     with open(cfg.desc_file) as f:
+    #         return f.read()
+    if cfg.template_file is not None:
+        # 1. 读取模板文件
+        if not cfg.template_file.exists():
+             raise FileNotFoundError(f"Template file not found at {cfg.template_file}")
+        
+        with open(cfg.template_file, "r") as f:
+            template_content = f.read()
+
+        # 2. 读取 data_dir 下的 description.md
+        desc_md_path = cfg.data_dir / "description.md"
+        if not desc_md_path.exists():
+            # 这里可以根据需要决定是报错还是给个默认值
+            raise FileNotFoundError(f"Task description file 'description.md' not found in data_dir: {cfg.data_dir}")
+            
+        with open(desc_md_path, "r") as f:
+            description_content = f.read()
+
+        t_sec = cfg.agent.time_limit
+        hours = t_sec // 3600
+        minutes = (t_sec % 3600) // 60
+        seconds = t_sec % 60
+        time_limit_str = f"{hours}hours {minutes}mins {seconds}secs"
+        
+        # 2. 获取步数限制
+        step_limit_str = str(cfg.agent.steps)
+        
+        # 3. 获取 GPU 类型 (直接从 cfg 读取)
+        device_type_str = cfg.device_type
+
+        # 3. 拼接：将 description 替换到模板的 {description} 处
+        # 使用 replace 而不是 format，防止 prompt 中包含其他花括号导致解析错误
+        full_instruction = template_content.replace("{description}", description_content)
+        full_instruction = full_instruction.replace("{device_type}", device_type_str)
+        full_instruction = full_instruction.replace("{time_limit}", time_limit_str)
+        full_instruction = full_instruction.replace("{step_limit}", step_limit_str)
+        
+        return full_instruction
 
     # or generate it from the goal and eval args
     if cfg.goal is None:
@@ -225,10 +272,11 @@ def prep_agent_workspace(cfg: Config):
 def save_run(cfg: Config, journal: Journal):
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
 
-    # filtered_journal = filter_journal(journal)
+    filtered_journal = filter_journal(journal)
     # save journal
-    # serialize.dump_json(journal, cfg.log_dir / "journal.json")
-    # serialize.dump_json(filtered_journal, cfg.log_dir / "filtered_journal.json")
+    serialize.dump_json(journal, cfg.log_dir / "journal.json")
+    serialize.dump_json(filtered_journal, cfg.log_dir / "filtered_journal.json")
+    
     # save config
     OmegaConf.save(config=cfg, f=cfg.log_dir / "config_mcts.yaml")
     
