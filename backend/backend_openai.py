@@ -30,6 +30,14 @@ OPENAI_TIMEOUT_EXCEPTIONS = (
 @once
 def _setup_openai_client(cfg:Config):
     global _client
+
+    # ================= [新增代码: DeepSeek URL 修正] =================
+    base_url = cfg.agent.feedback.base_url
+    if base_url.rstrip("/") in ["https://api.deepseek.com/v1", "https://api.deepseek.com"]:
+        logger.info(f"Redirecting Feedback Backend API to Beta: {base_url} -> https://api.deepseek.com/beta")
+        base_url = "https://api.deepseek.com/beta"
+    # ==============================================================
+
     _client = openai.OpenAI(
         base_url=cfg.agent.feedback.base_url,
         api_key=cfg.agent.feedback.api_key,

@@ -35,6 +35,14 @@ class LLM:
         """
         self.base_url = base_url
         self.api_key = api_key
+
+        # ================= [新增代码: DeepSeek URL 修正] =================
+        # 当检测到配置为 DeepSeek v1 或根域名时，强制指向 beta 接口以支持 reasoning 参数
+        if self.base_url.rstrip("/") in ["https://api.deepseek.com/v1", "https://api.deepseek.com"]:
+            logger.info(f"Redirecting DeepSeek API to Beta endpoint: {self.base_url} -> https://api.deepseek.com/beta")
+            self.base_url = "https://api.deepseek.com/beta"
+        # ==============================================================
+
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
