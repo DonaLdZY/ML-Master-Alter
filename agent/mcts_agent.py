@@ -149,6 +149,21 @@ class MCTSAgent:
                 "The implementation should include a predict() function, "
                 "allowing users to seamlessly reuse the code to make predictions on new data. "
                 "The prediction function should be well-documented, especially the function signature."
+                "**CRITICAL REQUIREMENT FOR REUSABILITY (expose_prediction=True):**\n"
+                "1. **Execution Guard**: You MUST wrap all training logic inside `if __name__ == '__main__':`.\n"
+                "2. **Standard Interface**: You MUST define a reusable prediction function with this EXACT signature:\n"
+                "   `def predict(test_data, model_path):`\n"
+                "   - `model_path`: A STRING path to the single model file.\n"
+                "   - **Logic**: Load the file -> Extract preprocessors & model -> Preprocess `test_data` -> Predict.\n"
+                "3. **SINGLE FILE ARTIFACT (STRICT)**:\n"
+                "   - You are PROHIBITED from saving separate files for encoders, scalers, or maps (e.g., NO `le.pkl`, NO `scaler.bin`).\n"
+                "   - You MUST pack ALL state (model, encoders, scalers, feature lists) into **ONE SINGLE OBJECT** (e.g., a dict `{'model': clf, 'enc': le}` or a `Pipeline`) and save it to ONE file if necessary.\n"
+                "   - If making predictions only requires a PyTorch model and doesn't need encoders, scalers, or feature lists, then just save it directly as a .pth file; the same applies to other methods. "
+                "4. **Model Persistence**: Inside `if __name__ == '__main__':`:\n"
+                "   - Create directory: `os.makedirs('./model', exist_ok=True)`.\n"
+                "   - **Save Path**: Save that SINGLE object to `./model/model.pth` (or `.pkl`, `.joblib`).\n"
+                "   - The filename MUST be exactly `model.pth` (or extension of choice), do not use other names."
+
             )
 
         if self.acfg.k_fold_validation > 1:
@@ -859,7 +874,42 @@ The memory of previous solutions used to improve performance is provided below:
                 if result_node:
                 
                     exe_res = exec_callback(result_node.code, result_node.id, True)
-                
+
+                    # ================= [修改逻辑] =================
+                    # 在解析结果之前，捕获并重命名模型文件
+                    if self.acfg.expose_prediction:
+                        import os
+                        # [修正] 直接指向根目录下的 model 文件夹，与 submission 平级
+                        model_subdir = self.cfg.workspace_dir / "model"
+                        
+                        if model_subdir.exists():
+                            # 常见的模型文件候选名
+                            candidates = ["model.pth", "model.pkl", "model.joblib", "model.keras", "model.h5", "model.bin"]
+                            
+                            for std_name in candidates:
+                                std_path = model_subdir / std_name
+                                
+                                if std_path.exists():
+                                    # 获取扩展名
+                                    ext = os.path.splitext(std_name)[1]
+                                    
+                                    # 目标路径: ./model/model_{node_id}.pth
+                                    # 这样 model 文件夹里就全是历史记录: model_id1.pth, model_id2.pth ...
+                                    target_name = f"model_{result_node.id}{ext}"
+                                    target_path = model_subdir / target_name
+                                    
+                                    try:
+                                        # 如果目标文件已存在，先删除
+                                        if target_path.exists():
+                                            os.remove(target_path)
+                                        
+                                        # 重命名操作: model.pkl -> model_{id}.pkl
+                                        os.rename(std_path, target_path)
+                                        logger.info(f"Captured model file: {std_name} -> {target_name}")
+                                        break # 找到一个就停止
+                                    except Exception as e:
+                                        logger.warning(f"Failed to rename model file {std_name}: {e}")
+
                     result_node = self.parse_exec_result(
                         node=result_node,
                         exec_result=exe_res
@@ -913,6 +963,19 @@ The memory of previous solutions used to improve performance is provided below:
             node = self.select(self.virtual_root)
 
         _root, result_node = self._step_search(node, exec_callback=exec_callback)
+
+        def find_node_model(n_id):
+            # [修正] 模型位于根目录 model/ 下
+            model_dir = self.cfg.workspace_dir / "model"
+            if not model_dir.exists(): return None, None
+            
+            # 支持多种后缀
+            for ext in ['.pth', '.pkl', '.joblib', '.keras', '.h5', '.cbm', '.bin']:
+                f_path = model_dir / f"model_{n_id}{ext}"
+                if f_path.exists():
+                    return f_path, ext
+            return None, None
+
         if result_node:
             submission_file_path = self.cfg.workspace_dir / "submission" / f"submission_{result_node.id}.csv"
             logger.info(f"In the search step from node {node.id}, the generated node is {result_node.id}, the metric is {result_node.metric.value}")
@@ -934,6 +997,37 @@ The memory of previous solutions used to improve performance is provided below:
                             f.write(result_node.code)
                         with open(best_solution_dir / "node_id.txt", "w") as f:
                             f.write(str(result_node.id))
+                        if self.acfg.expose_prediction:
+                            src_model, ext = find_node_model(result_node.id)
+                            
+                            # [修正] 目标文件夹: 根目录下的 best_model
+                            dest_model_dir = self.cfg.workspace_dir / "best_model"
+                            
+                            # 1. 每次更新 Best 时，清空 best_model 文件夹，保证里面只有当前最好的
+                            if dest_model_dir.exists():
+                                try:
+                                    shutil.rmtree(dest_model_dir)
+                                    logger.info("Cleared old best_model directory.")
+                                except Exception as e:
+                                    logger.warning(f"Failed to clear old best_model dir: {e}")
+                            
+                            # 2. 重建文件夹并复制
+                            if src_model:
+                                dest_model_dir.mkdir(parents=True, exist_ok=True)
+                                # 重命名为通用的 model.pth (不带 ID，对应 best_submission/submission.csv)
+                                dst_model = dest_model_dir / f"model{ext}"
+                                try:
+                                    shutil.copy(src_model, dst_model)
+                                    logger.info(f"Saved NEW best model to: {dst_model}")
+                                    
+                                    # (可选) 如果你希望 best_model 里也有 node_id.txt，可以加上这句，保持和 best_solution 一致
+                                    with open(dest_model_dir / "node_id.txt", "w") as f:
+                                        f.write(str(result_node.id))
+                                        
+                                except Exception as e:
+                                    logger.error(f"Failed to copy best model: {e}")
+                            else:
+                                logger.warning(f"New best node {result_node.id} has NO model file found in model/!")                
                 else:
                     logger.info(f"Node {result_node.id} is a invalid node")
                     logger.info(f"Node {self.best_node.id} is still the best node")
@@ -954,6 +1048,37 @@ The memory of previous solutions used to improve performance is provided below:
                             f.write(result_node.code)
                         with open(best_solution_dir / "node_id.txt", "w") as f:
                             f.write(str(result_node.id))
+                        if self.acfg.expose_prediction:
+                            src_model, ext = find_node_model(result_node.id)
+                            
+                            # [修正] 目标文件夹: 根目录下的 best_model
+                            dest_model_dir = self.cfg.workspace_dir / "best_model"
+                            
+                            # 1. 每次更新 Best 时，清空 best_model 文件夹，保证里面只有当前最好的
+                            if dest_model_dir.exists():
+                                try:
+                                    shutil.rmtree(dest_model_dir)
+                                    logger.info("Cleared old best_model directory.")
+                                except Exception as e:
+                                    logger.warning(f"Failed to clear old best_model dir: {e}")
+                            
+                            # 2. 重建文件夹并复制
+                            if src_model:
+                                dest_model_dir.mkdir(parents=True, exist_ok=True)
+                                # 重命名为通用的 model.pth (不带 ID，对应 best_submission/submission.csv)
+                                dst_model = dest_model_dir / f"model{ext}"
+                                try:
+                                    shutil.copy(src_model, dst_model)
+                                    logger.info(f"Saved NEW best model to: {dst_model}")
+                                    
+                                    # (可选) 如果你希望 best_model 里也有 node_id.txt，可以加上这句，保持和 best_solution 一致
+                                    with open(dest_model_dir / "node_id.txt", "w") as f:
+                                        f.write(str(result_node.id))
+                                        
+                                except Exception as e:
+                                    logger.error(f"Failed to copy best model: {e}")
+                            else:
+                                logger.warning(f"New best node {result_node.id} has NO model file found in model/!")
 
                 else:
                     logger.info(f"Node {result_node.id} is not the best node")

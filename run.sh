@@ -3,7 +3,7 @@ set -x # Print commands and their arguments as they are executed
 
 AGENT_DIR=./
 EXP_ID=gosou
-CUSTOM_EXP_NAME="goso"
+CUSTOM_EXP_NAME="goso10"
 dataset_dir=/home/donaldzy/文档/data
 MEMORY_INDEX=0
 

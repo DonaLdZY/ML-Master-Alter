@@ -38,7 +38,7 @@ agent:
   # whether to instruct the agent to use CV (set to 1 to disable)
   k_fold_validation: 1
   # whether to instruct the agent to generate a prediction function
-  expose_prediction: False
+  expose_prediction: True
   # whether to provide the agent with a preview of the data
   data_preview: True
   # whether to convert system messages into user messages
