@@ -16,7 +16,10 @@ def r1_query(
     llm = LLM(
         base_url=cfg.agent.code.base_url,
         api_key=cfg.agent.code.api_key,
-        model_name=cfg.agent.code.model
+        model_name=cfg.agent.code.model,
+        max_tokens=int(cfg.agent.code.max_tokens) if getattr(cfg.agent.code, "max_tokens", None) else None,
+        enable_thinking=cfg.agent.code.enable_thinking,
+        reasoning_effort=cfg.agent.code.reasoning_effort,
     )
     logger.info(f"using {llm.model_name} to generate code.")
     logger.info("---Querying model---", extra={"verbose": True})
@@ -61,7 +64,10 @@ def gpt_query(
     llm = LLM(
         base_url=cfg.agent.code.base_url,
         api_key=cfg.agent.code.api_key,
-        model_name=cfg.agent.code.model
+        model_name=cfg.agent.code.model,
+        max_tokens=int(cfg.agent.code.max_tokens) if getattr(cfg.agent.code, "max_tokens", None) else None,
+        enable_thinking=cfg.agent.code.enable_thinking,
+        reasoning_effort=cfg.agent.code.reasoning_effort,
     )
     logger.info(f"using {llm.model_name} to generate code.")
     logger.info("---Querying model---", extra={"verbose": True})

@@ -126,7 +126,11 @@ def get_longest_path(journal: Journal) -> list[str]:
 
 def filter_on_path(journal: Journal, path: list[str]) -> Journal:
     journal_copy = copy.deepcopy(journal)
-    journal_copy.nodes = [n for n in journal.nodes if n.id in path]
+    # Keep only copied nodes on the selected path.
+    # Do not reference `journal.nodes` here, otherwise mutating the filtered
+    # journal (e.g., replacing outputs with "<OMITTED>") will also mutate the
+    # original journal and cause output loss in `journal.json`.
+    journal_copy.nodes = [n for n in journal_copy.nodes if n.id in path]
     # further filter nodes, setting their _term_out and exc_stack to "<OMITTED>"
     for n in journal_copy.nodes:
         n._term_out = "<OMITTED>"

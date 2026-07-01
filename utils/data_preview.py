@@ -70,11 +70,20 @@ def preview_csv(p: Path, file_name: str, simple=True) -> str:
     Returns:
         str: the textual preview
     """
-    df = pd.read_csv(p)
+    # Read only a small sample to avoid loading huge CSV files into memory.
+    sample_rows = 2000
+    df = pd.read_csv(p, nrows=sample_rows)
+
+    # Approximate total row count by scanning lines without materializing all data.
+    # This keeps memory stable even for multi-GB files.
+    total_lines = sum(1 for _ in open(p, encoding="utf-8", errors="ignore"))
+    total_rows = max(total_lines - 1, 0)
 
     out = []
 
-    out.append(f"-> {file_name} has {df.shape[0]} rows and {df.shape[1]} columns.")
+    out.append(
+        f"-> {file_name} has about {total_rows} rows and {df.shape[1]} columns (profiled on first {min(total_rows, sample_rows)} rows)."
+    )
 
     if simple:
         cols = df.columns.tolist()

@@ -95,6 +95,121 @@ class RedirectQueue:
         pass
 
 
+def _replace_submission_name(code, _id):
+    submission_file_name = f"submission_{_id}.csv"
+    modified_code = code
+    if "submission/submission.csv" in code:
+        modified_code = code.replace("submission/submission.csv", f"submission/{submission_file_name}")
+    if "/submission.csv" in modified_code:
+        modified_code = modified_code.replace("/submission.csv", f"/{submission_file_name}")
+
+    if "to_csv('submission.csv" in modified_code:
+        modified_code = modified_code.replace("to_csv('submission.csv", f"to_csv('submission/{submission_file_name}")
+    if 'to_csv("submission.csv' in modified_code:
+        modified_code = modified_code.replace('to_csv("submission.csv', f'to_csv("submission/{submission_file_name}')
+
+    if '"submission.csv"' in modified_code:
+        modified_code = modified_code.replace('"submission.csv"', f'"{submission_file_name}"')
+    if "'submission.csv'" in modified_code:
+        modified_code = modified_code.replace("'submission.csv'", f"'{submission_file_name}'")
+
+    return modified_code
+
+
+def _child_proc_setup(working_dir: Path, result_outq: Queue) -> None:
+    try:
+        print("[child_proc_setup] import shutup...")
+        import shutup
+
+        print("[child_proc_setup] mute_warnings...")
+        shutup.mute_warnings()
+
+        print(f"[child_proc_setup] chdir to {working_dir}...")
+        os.chdir(str(working_dir))
+
+        print("[child_proc_setup] append to sys.path...")
+        sys.path.append(str(working_dir))
+
+        print("[child_proc_setup] redirect stdout/stderr...")
+        sys.stdout = sys.stderr = RedirectQueue(result_outq)
+
+    except Exception:
+        result_outq.put("[child_proc_setup error] " + traceback.format_exc())
+        raise
+
+
+def _run_session_worker(
+    code_inq: Queue,
+    result_outq: Queue,
+    event_outq: Queue,
+    process_id: int,
+    working_dir: str,
+    start_cpu_id: int,
+    cpu_number: int,
+    max_parallel_run: int,
+    agent_file_name: str,
+    format_tb_ipython: bool,
+) -> None:
+    working_dir_path = Path(working_dir).resolve()
+    _child_proc_setup(working_dir_path, result_outq)
+
+    global_scope: dict = {"__name__": "__main__"}
+    while True:
+        code, run_id = code_inq.get()
+        os.chdir(str(working_dir_path))
+        cpu_number_per_session = max(1, int(cpu_number / max_parallel_run))
+        start_cpu_id_session = start_cpu_id + process_id * cpu_number_per_session
+        cpu_set = set()
+        for i in range(start_cpu_id_session, start_cpu_id_session + cpu_number_per_session):
+            cpu_set.add(i)
+        logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
+        pre_code = (
+            "import os\n"
+            "import sys\n"
+            "try:\n"
+            "    # Linux: prefer native os.sched_setaffinity\n"
+            "    if hasattr(os, 'sched_setaffinity') and sys.platform.startswith('linux'):\n"
+            "        os.sched_setaffinity(0, {cpu_set})\n"
+            "    # Windows: use psutil cpu affinity when available\n"
+            "    elif sys.platform.startswith('win'):\n"
+            "        import psutil\n"
+            "        p = psutil.Process()\n"
+            "        if hasattr(p, 'cpu_affinity'):\n"
+            "            p.cpu_affinity({cpu_list})\n"
+            "    # macOS/others: skip affinity binding safely\n"
+            "except Exception as _affinity_err:\n"
+            "    print('[affinity warning] ' + str(_affinity_err))\n"
+        ).format(cpu_set=cpu_set, cpu_list=sorted(cpu_set))
+
+        code = _replace_submission_name(code=code, _id=run_id)
+        code = pre_code + code
+        with open(agent_file_name, "w") as f:
+            f.write(code)
+        event_outq.put(("state:ready",))
+        try:
+            exec(compile(code, agent_file_name, "exec"), global_scope)
+        except BaseException as e:
+            tb_str, e_cls_name, exc_info, exc_stack = exception_summary(
+                e,
+                working_dir_path,
+                agent_file_name,
+                format_tb_ipython,
+            )
+            result_outq.put(tb_str)
+
+            if e_cls_name == "KeyboardInterrupt":
+                e_cls_name = "TimeoutError"
+
+            event_outq.put(("state:finished", e_cls_name, exc_info, exc_stack))
+        else:
+            event_outq.put(("state:finished", None, None, None))
+
+        if os.path.exists(agent_file_name):
+            os.remove(agent_file_name)
+
+        result_outq.put("<|EOF|>")
+
+
 class Interpreter:
     def __init__(
         self,
@@ -210,55 +325,6 @@ class Interpreter:
         
         return modified_code
     
-    def _run_session(
-        self, code_inq: Queue, result_outq: Queue, event_outq: Queue, process_id: int
-    ) -> None:
-        
-        self.child_proc_setup(result_outq)
-        
-        global_scope: dict = {}
-        global_scope["__name__"] = "__main__"
-        while True:
-            
-            code, id = code_inq.get()
-            os.chdir(str(self.working_dir))
-            cpu_number_per_session = int(self.cpu_number / self.max_parallel_run)
-            start_cpu_id_session = self.start_cpu_id + process_id * cpu_number_per_session
-            cpu_set = set()
-            for i in range(start_cpu_id_session,start_cpu_id_session+cpu_number_per_session):
-                cpu_set.add(i)
-            logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
-            pre_code = "import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
-            
-            code  = self.replace_submission_name(code=code, _id=id)
-            code = pre_code + code
-            with open(self.agent_file_name[process_id], "w") as f:
-                f.write(code)
-            event_outq.put(("state:ready",))
-            try:               
-                exec(compile(code, self.agent_file_name[process_id], "exec"), global_scope)
-            except BaseException as e:
-                tb_str, e_cls_name, exc_info, exc_stack = exception_summary(
-                    e,
-                    self.working_dir,
-                    self.agent_file_name[process_id],
-                    self.format_tb_ipython,
-                )
-                result_outq.put(tb_str)
-                
-                if e_cls_name == "KeyboardInterrupt":
-                    e_cls_name = "TimeoutError"
-
-                event_outq.put(("state:finished", e_cls_name, exc_info, exc_stack))
-            else:
-                event_outq.put(("state:finished", None, None, None))
-
-            # remove the file after execution (otherwise it might be included in the data preview)
-            os.remove(self.agent_file_name[process_id])
-
-            # put EOF marker to indicate that we're done
-            result_outq.put("<|EOF|>")
-
     def create_process(self,process_id) -> None:
         # we use three queues to communicate with the child process:
         # - code_inq: send code to child to execute
@@ -268,8 +334,19 @@ class Interpreter:
         print(f"create process for {process_id}")
         self.code_inq[process_id], self.result_outq[process_id], self.event_outq[process_id] = Queue(), Queue(), Queue()
         self.process[process_id] = Process(
-            target=self._run_session,
-            args=(self.code_inq[process_id], self.result_outq[process_id], self.event_outq[process_id],process_id),
+            target=_run_session_worker,
+            args=(
+                self.code_inq[process_id],
+                self.result_outq[process_id],
+                self.event_outq[process_id],
+                process_id,
+                str(self.working_dir),
+                self.start_cpu_id,
+                self.cpu_number,
+                self.max_parallel_run,
+                self.agent_file_name[process_id],
+                self.format_tb_ipython,
+            ),
         )
         self.process[process_id].start()
 
@@ -321,16 +398,16 @@ class Interpreter:
         process_id = None 
         # assign process_id
         with self.lock:
-            self.current_parallel_run += 1
             for idx in range(self.max_parallel_run):
                 if self.status_map[idx] == 0:
                     self.status_map[idx] = 1 # signals occupied
                     process_id = idx
+                    self.current_parallel_run += 1
                     logger.info(f"has assigned process_id，process_id is {process_id}")
                     break
-                elif idx == self.max_parallel_run-1: # if not assigned
-                    logger.info("reach max process parallel number")
-                    raise ValueError("reach max process parallel number")
+            if process_id is None:
+                logger.info("reach max process parallel number")
+                raise ValueError("reach max process parallel number")
         
         if reset_session:
             if self.process[process_id] is not None:
@@ -342,7 +419,13 @@ class Interpreter:
                     error_message = traceback.format_exc()
                     logger.warning(error_message) # Most likely, this process has already been killed, and killing the same process repeatedly has caused it to run normally
 
-            self.create_process(process_id=process_id)
+            try:
+                self.create_process(process_id=process_id)
+            except Exception:
+                with self.lock:
+                    self.current_parallel_run -= 1
+                    self.status_map[process_id] = 0
+                raise
         else:
             # reset_session needs to be True on first exec
             assert self.process[process_id] is not None
@@ -724,6 +807,3 @@ if __name__ == "__main__":
     result = interpreter.replace_submission_name(test_code, _id="12345")
     print(result)
     
-
-
-

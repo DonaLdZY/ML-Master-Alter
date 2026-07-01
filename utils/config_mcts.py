@@ -30,6 +30,9 @@ class StageConfig:
     temp: float
     base_url: str
     api_key: str
+    enable_thinking: bool | None = None
+    reasoning_effort: str | None = None
+    max_tokens: int | None = None
 
 @dataclass
 class LinearDecay:

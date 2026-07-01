@@ -4,17 +4,17 @@ set -x # Print commands and their arguments as they are executed
 AGENT_DIR=./
 EXP_ID=gosou
 CUSTOM_EXP_NAME="goso10"
-dataset_dir=/home/donaldzy/文档/data
+dataset_dir="D:\Files\项目\data"
 MEMORY_INDEX=0
 
-code_model=deepseek-chat
+code_model=deepseek-v4-pro
 code_temp=0.5
-code_base_url="https://api.deepseek.com/beta"
+code_base_url="https://api.deepseek.com/"
 code_api_key=${DEEPSEEK_API_KEY}
 
-feedback_model=deepseek-chat
+feedback_model=deepseek-v4-pro
 feedback_temp=0.5
-feedback_base_url="https://api.deepseek.com/beta"
+feedback_base_url="https://api.deepseek.com/"
 feedback_api_key=${DEEPSEEK_API_KEY}
 
 start_cpu=0

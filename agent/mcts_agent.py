@@ -16,6 +16,7 @@ from utils.metric import MetricValue, WorstMetricValue
 from utils.response import extract_code, extract_text_up_to_code, wrap_code, extract_review
 from utils.server_utils import call_validate
 from utils.mcts import linear_decay, exponential_decay, piecewise_decay, dynamic_piecewise_decay
+from utils.event_stream import emit_event
 import threading
 
 logger = logging.getLogger("ml-master")
@@ -95,7 +96,44 @@ class MCTSAgent:
         self.search_start_time = None
         self.journal_lock = threading.Lock()
         self.save_node_lock = threading.Lock()
+        self.data_preview_lock = threading.Lock()
         self.start_time = time.time()
+        emit_event("agent.mcts", "INITIALIZED", virtual_root_id=self.virtual_root.id)
+
+    def _emit_node_snapshot(self, node: MCTSNode, action: str) -> None:
+        """Emit frontend-friendly node payload without changing core search logic."""
+        try:
+            metric_val = None
+            maximize = None
+            if node.metric is not None:
+                metric_val = node.metric.value
+                maximize = node.metric.maximize
+            emit_event(
+                "mcts.node",
+                "SNAPSHOT",
+                action=action,
+                node_id=node.id,
+                parent_id=(None if node.parent is None else node.parent.id),
+                stage=node.stage,
+                visits=int(node.visits),
+                total_reward=float(node.total_reward),
+                uct=node._uct,
+                is_buggy=node.is_buggy,
+                is_valid=node.is_valid,
+                is_terminal=node.is_terminal,
+                continue_improve=node.continue_improve,
+                improve_failure_depth=int(node.improve_failure_depth),
+                metric=metric_val,
+                maximize=maximize,
+                exec_time=node.exec_time,
+                finish_time=node.finish_time,
+                plan=(node.plan or "")[:1200],
+                code=(node.code or "")[:1200],
+                result=(node.term_out or "")[:1200],
+                insight=(node.analysis or "")[:1200],
+            )
+        except Exception as e:
+            logger.warning(f"Failed to emit node snapshot for {node.id}: {e}")
         
     @property
     def _prompt_environment(self):
@@ -185,6 +223,7 @@ class MCTSAgent:
     
     def _draft(self) -> MCTSNode:
         logger.info("Starting Drafting a new Node.")
+        emit_event("agent.mcts", "ACTION_STARTED", action="draft")
         introduction = (
             "You are a Kaggle grandmaster attending a competition. "
             "In order to win this competition, you need to come up with an excellent and creative plan "
@@ -249,10 +288,12 @@ The memory of previous solutions used to solve task is provided below:
         plan, code = self.plan_and_code_query(prompt_complete)
         new_node = MCTSNode(plan=plan, code=code, parent=self.virtual_root, stage="draft", local_best_node=self.virtual_root)
         logger.info(f"Drafted a new node {new_node.id} successfully!")
+        emit_event("mcts.node", "CREATED", node_id=new_node.id, parent_id=self.virtual_root.id, action="draft", stage=new_node.stage)
         return new_node
 
     def _improve(self, parent_node: MCTSNode) -> MCTSNode:
         logger.info(f"Starting Improving Node {parent_node.id}.")
+        emit_event("agent.mcts", "ACTION_STARTED", action="improve", parent_id=parent_node.id)
         introduction = (
             "You are a Kaggle grandmaster attending a competition. You are provided with a previously developed "
             "solution below and should improve it in order to further increase the (test time) performance. "
@@ -328,10 +369,12 @@ The memory of previous solutions used to improve performance is provided below:
         plan, code = self.plan_and_code_query(prompt_complete)
         new_node = MCTSNode(plan=plan, code=code, parent=parent_node, stage="improve", local_best_node=parent_node.local_best_node)
         logger.info(f"Improving node {parent_node.id} to create new node {new_node.id}")
+        emit_event("mcts.node", "CREATED", node_id=new_node.id, parent_id=parent_node.id, action="improve", stage=new_node.stage)
         return new_node
 
     def _debug(self, parent_node: MCTSNode) -> MCTSNode:
         logger.info(f"Starting Debugging Node {parent_node.id}.")
+        emit_event("agent.mcts", "ACTION_STARTED", action="debug", parent_id=parent_node.id)
         introduction = (
             "You are a Kaggle grandmaster attending a competition. "
             "Your previous solution had a bug and/or did not produce a submission.csv, "
@@ -406,6 +449,7 @@ The memory of previous solutions used to improve performance is provided below:
         plan, code = self.plan_and_code_query(prompt_complete)
         new_node = MCTSNode(plan=plan, code=code, parent=parent_node, stage="debug", local_best_node=parent_node.local_best_node)
         logger.info(f"Debugging node {parent_node.id} to create new node {new_node.id}")
+        emit_event("mcts.node", "CREATED", node_id=new_node.id, parent_id=parent_node.id, action="debug", stage=new_node.stage)
         return new_node
     
     def plan_and_code_query(self, prompt, retries=3) -> tuple[str, str]:
@@ -453,6 +497,7 @@ The memory of previous solutions used to improve performance is provided below:
 
     def backpropagate(self, node: MCTSNode, value: float, add_to_tree=True):
         logger.info(f"node {node.id} start backpropagating with reward {value}.")
+        emit_event("agent.mcts", "BACKPROPAGATE_STARTED", node_id=node.id, reward=float(value), add_to_tree=bool(add_to_tree))
         while node != None:
             if node.is_buggy is False and node.parent.is_buggy is True:
                 node.parent.is_debug_success = True
@@ -467,10 +512,12 @@ The memory of previous solutions used to improve performance is provided below:
                 node.improve_failure_depth = 0
             node.update(value, add_to_tree)
             node = node.parent
+        emit_event("agent.mcts", "BACKPROPAGATE_COMPLETED")
             
     def parse_exec_result(self, node: MCTSNode, exec_result: ExecutionResult) -> MCTSNode:
         try:
             logger.info(f"Agent is parsing execution results for node {node.id}")
+            emit_event("mcts.node", "EVAL_STARTED", node_id=node.id)
 
             node.absorb_exec_result(exec_result)
 
@@ -564,14 +611,25 @@ The memory of previous solutions used to improve performance is provided below:
                 node.metric = MetricValue(
                     response["metric"], maximize=not response["lower_is_better"]
                 )
+            emit_event(
+                "mcts.node",
+                "EVAL_COMPLETED",
+                node_id=node.id,
+                is_buggy=bool(node.is_buggy),
+                metric=(None if node.metric is None else node.metric.value),
+                maximize=(None if node.metric is None else node.metric.maximize),
+                is_valid=node.is_valid,
+            )
             return node
         except Exception as e:
             logger.warning(f"parse result with tool error:{e}")
+            emit_event("mcts.node", "EVAL_FAILED", node_id=node.id, error=str(e))
             logger.info("parse_exec_result_without_tool")
             return self.parse_exec_result_without_tool(node, exec_result)
 
     def parse_exec_result_without_tool(self, node: MCTSNode, exec_result: ExecutionResult) -> MCTSNode:
         logger.info(f"Agent is parsing execution results for node {node.id} without using tool.")
+        emit_event("mcts.node", "EVAL_STARTED", node_id=node.id, mode="fallback")
         node.absorb_exec_result(exec_result)
         introduction = (
             "You are a Kaggle grandmaster attending a competition. "
@@ -686,10 +744,21 @@ The memory of previous solutions used to improve performance is provided below:
             node.metric = MetricValue(
                 response["metric"], maximize=not response["lower_is_better"]
             )
+        emit_event(
+            "mcts.node",
+            "EVAL_COMPLETED",
+            node_id=node.id,
+            is_buggy=bool(node.is_buggy),
+            metric=(None if node.metric is None else node.metric.value),
+            maximize=(None if node.metric is None else node.metric.maximize),
+            is_valid=node.is_valid,
+            mode="fallback",
+        )
         return node
 
     def select(self, node: MCTSNode):
         logger.info(f"[select] Processing node: {node.id}")
+        emit_event("agent.mcts", "SELECT_STARTED", from_node_id=node.id, from_stage=node.stage)
         while node and not node.is_terminal:
             if not node.is_fully_expanded_with_expected(scfg=self.scfg):
                 if node.is_buggy and node.is_debug_success is True:
@@ -702,6 +771,7 @@ The memory of previous solutions used to improve performance is provided below:
             else:
                 node = self.uct_select(node)
         logger.info(f"[select]choose a node for expanding: {node.id}")
+        emit_event("agent.mcts", "SELECT_COMPLETED", selected_node_id=node.id, selected_stage=node.stage)
         return node
 
     def get_C(self):
@@ -755,19 +825,63 @@ The memory of previous solutions used to improve performance is provided below:
             return dcfg.exploration_constant
 
     def uct_select(self, node: MCTSNode):
+        current_c = self.get_C()
         if self.is_root(node):
             filtered_children = [child for child in node.children if not child.lock]
             logger.info(f"For node {node.id}, there are {len(node.children) - len(filtered_children)}/{len(node.children)} is locked.")
             selected_node = node
+            scored_children = []
+            for child in filtered_children:
+                uct_value = child.uct_value(exploration_constant=current_c)
+                scored_children.append(
+                    {
+                        "node_id": child.id,
+                        "stage": child.stage,
+                        "uct": uct_value,
+                        "visits": int(child.visits),
+                        "metric": (None if child.metric is None else child.metric.value),
+                        "is_buggy": child.is_buggy,
+                    }
+                )
             if len(filtered_children) > 0:
-                selected_node = max(filtered_children, key=lambda child: child.uct_value(exploration_constant = self.get_C()))
+                selected_node = max(filtered_children, key=lambda child: child.uct_value(exploration_constant=current_c))
+            emit_event(
+                "agent.mcts",
+                "UCT_SELECTED",
+                parent_node_id=node.id,
+                selected_node_id=selected_node.id,
+                exploration_constant=current_c,
+                candidates=scored_children[:50],
+            )
                 
             if selected_node.stage == "draft":
                 selected_node.lock = True
                 logger.info(f"Draft node {selected_node.id} is locked.")
             return selected_node
         else:
-            return max(node.children, key=lambda child: child.uct_value(exploration_constant = self.get_C()))
+            scored_children = []
+            for child in node.children:
+                uct_value = child.uct_value(exploration_constant=current_c)
+                scored_children.append(
+                    {
+                        "node_id": child.id,
+                        "stage": child.stage,
+                        "uct": uct_value,
+                        "visits": int(child.visits),
+                        "metric": (None if child.metric is None else child.metric.value),
+                        "is_buggy": child.is_buggy,
+                    }
+                )
+            selected_node = max(node.children, key=lambda child: child.uct_value(exploration_constant=current_c))
+            emit_event(
+                "agent.mcts",
+                "UCT_SELECTED",
+                parent_node_id=node.id,
+                selected_node_id=selected_node.id,
+                exploration_constant=current_c,
+                candidates=scored_children[:50],
+            )
+            return selected_node
 
     
     def check_improvement(self, cur_node: MCTSNode, parent_node: MCTSNode):
@@ -914,6 +1028,7 @@ The memory of previous solutions used to improve performance is provided below:
                         node=result_node,
                         exec_result=exe_res
                     )
+                    self._emit_node_snapshot(result_node, action="post_eval")
                     if not result_node.is_buggy:
                         if not (self.cfg.workspace_dir / "submission" / f"submission_{result_node.id}.csv").exists():
                             result_node.is_buggy = True
@@ -928,6 +1043,7 @@ The memory of previous solutions used to improve performance is provided below:
                         parent_node.is_debug_success = True
                     
                     _root = self.check_improvement(result_node, parent_node)
+                    self._emit_node_snapshot(result_node, action="post_check_improvement")
                     with self.journal_lock:
                         if self.best_node and result_node.metric.maximize and self.best_node.metric.maximize != result_node.metric.maximize:
                             logger.warning("New node's metric is inconsistent with metrics in the journal.Returning to the parent node to regenerate.")
@@ -955,14 +1071,17 @@ The memory of previous solutions used to improve performance is provided below:
         return max(good_node, key=lambda n: n.metric)
 
     def step(self, node: MCTSNode, exec_callback: ExecCallbackType) -> bool:   
-        if not self.journal.nodes or self.data_preview is None:
-            self.update_data_preview()
-            self.search_start_time = time.time()
+        if self.data_preview is None:
+            with self.data_preview_lock:
+                if self.data_preview is None:
+                    self.update_data_preview()
+                    self.search_start_time = time.time()
 
         if not node or node.stage == "root":
             node = self.select(self.virtual_root)
 
         _root, result_node = self._step_search(node, exec_callback=exec_callback)
+        emit_event("agent.mcts", "SEARCH_STEP_COMPLETED", selected_node_id=node.id, produced_node_id=(None if result_node is None else result_node.id))
 
         def find_node_model(n_id):
             # [修正] 模型位于根目录 model/ 下
@@ -984,6 +1103,7 @@ The memory of previous solutions used to improve performance is provided below:
                 logger.info(f"Node {result_node.id} is the best node so far")
                 if self.best_node is None or result_node.is_valid is True:
                     self.best_node = result_node
+                    emit_event("agent.mcts", "BEST_NODE_UPDATED", node_id=result_node.id, metric=result_node.metric.value, maximize=result_node.metric.maximize)
                     best_solution_dir = self.cfg.workspace_dir / "best_solution"
                     best_submission_dir = self.cfg.workspace_dir / "best_submission"
                     with self.save_node_lock:
@@ -1035,6 +1155,7 @@ The memory of previous solutions used to improve performance is provided below:
                 if self.best_node.is_valid is False:
                     logger.info(f"Node {self.best_node.id} is invalid, {result_node.id} is the best node so far")
                     self.best_node = result_node
+                    emit_event("agent.mcts", "BEST_NODE_UPDATED", node_id=result_node.id, metric=result_node.metric.value, maximize=result_node.metric.maximize)
                     best_solution_dir = self.cfg.workspace_dir / "best_solution"
                     best_submission_dir = self.cfg.workspace_dir / "best_submission"
                     with self.save_node_lock:
@@ -1089,6 +1210,7 @@ The memory of previous solutions used to improve performance is provided below:
             logger.info(f"result node has bug.")
         if self.best_node:
             logger.info(f"Best metric value is {self.best_node.metric.value}.")
+            emit_event("agent.mcts", "BEST_NODE_SNAPSHOT", node_id=self.best_node.id, metric=self.best_node.metric.value, maximize=self.best_node.metric.maximize)
 
         if not self.acfg.save_all_submission and result_node and os.path.exists(submission_file_path):
             os.remove(submission_file_path)

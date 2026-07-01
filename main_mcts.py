@@ -2,6 +2,7 @@ import atexit
 import logging
 import shutil
 import sys
+import time
 
 import backend
 import threading
@@ -27,6 +28,8 @@ from rich.markdown import Markdown
 from rich.status import Status
 from rich.tree import Tree
 from utils.config_mcts import load_task_desc, prep_agent_workspace, save_run, load_cfg
+from utils.serialize import load_json
+from utils.event_stream import configure_event_sink, emit_event
 
 class VerboseFilter(logging.Filter):
     """
@@ -90,8 +93,26 @@ def journal_to_string_tree(journal: Journal) -> str:
     return tree_str
 
 
+def _repair_mcts_journal_state(journal: Journal):
+    if len(journal) == 0:
+        return journal
+    id2node = {n.id: n for n in journal.nodes}
+    for n in journal.nodes:
+        if getattr(n, "children", None) is None:
+            n.children = set()
+    for n in journal.nodes:
+        p = getattr(n, "parent", None)
+        if p is None:
+            continue
+        if p.id in id2node:
+            id2node[p.id].children.add(n)
+    return journal
+
+
 def run():
     cfg = load_cfg()
+    configure_event_sink(cfg.log_dir / "event_stream.jsonl")
+    emit_event("pipeline", "RUN_STARTED", exp_name=cfg.exp_name)
     log_format = "[%(asctime)s] %(levelname)s: %(message)s"
     logging.basicConfig(
         level=getattr(logging, cfg.log_level.upper()), format=log_format, handlers=[]
@@ -121,12 +142,14 @@ def run():
     logger.addHandler(console_handler)
 
     logger.info(f'Starting run "{cfg.exp_name}"')
+    emit_event("pipeline", "CONFIG_READY", log_dir=str(cfg.log_dir), workspace_dir=str(cfg.workspace_dir))
 
     task_desc = load_task_desc(cfg)
     task_desc_str = backend.compile_prompt_to_md(task_desc)
 
     with Status("Preparing agent workspace (copying and extracting files) ..."):
         prep_agent_workspace(cfg)
+    emit_event("pipeline", "WORKSPACE_READY")
 
     def cleanup():
         if global_step == 0:
@@ -144,12 +167,24 @@ def run():
 
     atexit.register(cleanup)
 
-    journal = Journal()
+    resume_path = cfg.log_dir / "journal.json"
+    if resume_path.exists():
+        try:
+            journal = load_json(resume_path, Journal)
+            journal = _repair_mcts_journal_state(journal)
+            logger.info(f"Resuming from existing journal: {resume_path}")
+            emit_event("pipeline", "RUN_RESUMED", journal_path=str(resume_path), nodes=len(journal))
+        except Exception as e:
+            logger.warning(f"Failed to load existing journal, starting fresh: {e}")
+            journal = Journal()
+    else:
+        journal = Journal()
     agent = Agent(
         task_desc=task_desc,
         cfg=cfg,
         journal=journal,
     )
+    emit_event("agent.mcts", "CREATED", steps=cfg.agent.steps, parallel_search_num=cfg.agent.search.parallel_search_num)
 
     interpreter = Interpreter(
         cfg.workspace_dir, **OmegaConf.to_container(cfg.exec), cfg=cfg  # type: ignore
@@ -174,40 +209,94 @@ def run():
     def step_task(node=None):
         if node:
             logger.info(f"[step_task] Processing node: {node.id}")
+            emit_event("agent.mcts", "STEP_STARTED", node_id=node.id, node_stage=node.stage)
         else:
             logger.info(f"[step_task] Processing virtual root node.")
+            emit_event("agent.mcts", "STEP_STARTED", node_id="root", node_stage="root")
         return agent.step(exec_callback=exec_callback, node=node)
     
     max_workers = cfg.agent.search.parallel_search_num
     total_steps = cfg.agent.steps
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    global_deadline = time.time() + max(1, int(cfg.agent.time_limit))
+    timed_out = False
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = set()
+    completed = 0
+    lock = threading.Lock()
+    try:
         futures = {executor.submit(step_task) for _ in range(min(max_workers, total_steps))}
-        completed = 0
-        lock = threading.Lock()
         while completed <= total_steps:
-            
-            done, _ = wait(futures, return_when=FIRST_COMPLETED)
-            
+            now = time.time()
+            if now >= global_deadline:
+                timed_out = True
+                logger.warning(
+                    f"Global time limit reached ({cfg.agent.time_limit}s). "
+                    "Stopping MCTS expansion and finalizing current artifacts."
+                )
+                emit_event(
+                    "pipeline",
+                    "RUN_TIMEOUT",
+                    completed=int(completed),
+                    total_steps=int(total_steps),
+                    time_limit_secs=int(cfg.agent.time_limit),
+                )
+                break
+
+            wait_timeout = max(0.1, min(2.0, global_deadline - now))
+            done, _ = wait(futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+
             for fut in done:
                 futures.remove(fut)
                 try:
                     cur_node = fut.result()
                     logger.info(f"current node count is {completed}, current node.id is {cur_node.id}")
+                    emit_event("agent.mcts", "STEP_COMPLETED", next_node_id=cur_node.id, next_node_stage=cur_node.stage)
                 except Exception as e:
                     logger.exception(f"Exception during step_task execution: {e}")
+                    emit_event("agent.mcts", "STEP_FAILED", error=str(e))
                     cur_node = None
 
                 with lock:
                     save_run(cfg, journal)
                     completed = len(journal)-1. # Exclude virtual node
+                    emit_event("pipeline", "JOURNAL_SAVED", completed=int(completed), total_steps=int(total_steps))
                     if completed == total_steps:
                         logger.info(journal_to_string_tree(journal))
+                        emit_event("pipeline", "RUN_COMPLETED", completed=int(completed))
+
+                # No further expansion after deadline.
+                if time.time() >= global_deadline:
+                    timed_out = True
+                    emit_event(
+                        "pipeline",
+                        "RUN_TIMEOUT",
+                        completed=int(completed),
+                        total_steps=int(total_steps),
+                        time_limit_secs=int(cfg.agent.time_limit),
+                    )
+                    break
 
                 if completed + len(futures) < total_steps:
                     futures.add(executor.submit(step_task, cur_node))
+    finally:
+        # Cancel pending futures that have not started.
+        for fut in list(futures):
+            fut.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    # Finalization phase (save artifacts and exit gracefully).
+    try:
+        save_run(cfg, journal)
+        if timed_out:
+            logger.info(journal_to_string_tree(journal))
+            emit_event("pipeline", "RUN_FINALIZED_AFTER_TIMEOUT", completed=int(completed), total_steps=int(total_steps))
+    except Exception as e:
+        logger.warning(f"Final save_run failed: {e}")
         
     interpreter.cleanup_session(-1)
+    emit_event("pipeline", "CLEANUP_COMPLETED")
 
 
 if __name__ == "__main__":    

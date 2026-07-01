@@ -58,6 +58,9 @@ agent:
     temp: 0.5
     base_url: "your_deepseek_url"
     api_key: "your_deepseek_url"
+    enable_thinking: null
+    reasoning_effort: null
+    max_tokens: null
 
   # LLM settings for evaluating program output / tracebacks
   feedback:
@@ -65,6 +68,9 @@ agent:
     temp: 0.5
     base_url: "your_gpt_url"
     api_key: "your_gpt_api_key"
+    enable_thinking: null
+    reasoning_effort: null
+    max_tokens: null
 
   # hyperparameters for the tree search
   search:
@@ -94,7 +100,5 @@ agent:
       alpha: 0.01
       phase_ratios: [0.85, 1]
     
-
-
 
 

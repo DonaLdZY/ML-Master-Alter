@@ -19,11 +19,49 @@ logger = logging.getLogger("ml-master")
 _client: openai.OpenAI = None  # type: ignore
 
 
+def _is_deepseek_model(model_name: str) -> bool:
+    return str(model_name or "").strip().lower().startswith("deepseek")
+
+
+def _normalize_reasoning_effort(effort: str | None) -> str | None:
+    if effort is None:
+        return None
+    text = str(effort).strip().lower()
+    if text in {"", "default", "none", "null"}:
+        return None
+    return {"low": "high", "medium": "high", "xhigh": "max"}.get(text, text)
+
+
+def _feedback_max_tokens(cfg: Config) -> int | None:
+    try:
+        tokens = int(getattr(cfg.agent.feedback, "max_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return tokens if tokens > 0 else None
+
+
+def _feedback_extra_body(cfg: Config, model: str) -> dict:
+    enabled = getattr(cfg.agent.feedback, "enable_thinking", None)
+    if enabled is None:
+        return {}
+    if _is_deepseek_model(model):
+        body = {"thinking": {"type": "enabled" if enabled else "disabled"}}
+        effort = _normalize_reasoning_effort(getattr(cfg.agent.feedback, "reasoning_effort", None))
+        if enabled and effort:
+            body["reasoning_effort"] = effort
+        return body
+    return {
+        "chat_template_kwargs": {"thinking": bool(enabled)},
+        "separate_reasoning": bool(enabled),
+    }
+
+
 OPENAI_TIMEOUT_EXCEPTIONS = (
     openai.RateLimitError,
     openai.APIConnectionError,
     openai.APITimeoutError,
     openai.InternalServerError,
+    openai.APIStatusError,
 )
 
 
@@ -39,7 +77,7 @@ def _setup_openai_client(cfg:Config):
     # ==============================================================
 
     _client = openai.OpenAI(
-        base_url=cfg.agent.feedback.base_url,
+        base_url=base_url,
         api_key=cfg.agent.feedback.api_key,
         max_retries=0,
     )
@@ -57,11 +95,19 @@ def query(
     filtered_kwargs: dict = select_values(notnone, model_kwargs)  # type: ignore
 
     messages = opt_messages_to_list(system_message, user_message, convert_system_to_user=convert_system_to_user)
+    if not filtered_kwargs.get("max_tokens"):
+        configured_max_tokens = _feedback_max_tokens(cfg)
+        if configured_max_tokens is not None:
+            filtered_kwargs["max_tokens"] = configured_max_tokens
 
     if func_spec is not None:
         filtered_kwargs["tools"] = [func_spec.as_openai_tool_dict]
         # force the model the use the function
         filtered_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
+
+    extra_body = _feedback_extra_body(cfg, str(filtered_kwargs.get("model") or cfg.agent.feedback.model))
+    if extra_body:
+        filtered_kwargs["extra_body"] = extra_body
 
     t0 = time.time()
     message_print = messages[0]["content"]

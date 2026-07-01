@@ -1,0 +1,19 @@
+python main_mcts.py `
+   dataset_dir="D:/Files/项目/data" `
+   data_dir="D:/Files/项目/data/goso6" `
+   template_file="./instruction/instruction_template.txt" `
+   exp_name="goso6_run9" `
+   start_cpu_id="0" `
+   cpu_number="4" `
+   agent.time_limit=3600 `
+   agent.steps=500 `
+   agent.check_format=false `
+   agent.code.model=deepseek-v4-pro `
+   agent.code.temp=0.5 `
+   agent.code.base_url="https://api.deepseek.com" `
+   agent.code.api_key="$env:DEEPSEEK_API_KEY" `
+   agent.feedback.model=deepseek-v4-pro `
+   agent.feedback.temp=0.5 `
+   agent.feedback.base_url="https://api.deepseek.com" `
+   agent.feedback.api_key="$env:DEEPSEEK_API_KEY" `
+   agent.search.parallel_search_num=2
